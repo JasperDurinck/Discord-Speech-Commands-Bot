@@ -21,6 +21,9 @@ text_queue = Queue()
 video_urls_queue = queue.Queue()
 tts_queue = queue.Queue()
 
+# Create a lock (prefent the threads from accessing something at same time)
+lock = threading.Lock()
+
 async def queueTTS_checker(vc, tts_queue):
     while True:
         # Wait for some time before checking the queue again
@@ -56,7 +59,9 @@ async def start_transcription(audio_queue, text_queue):
         await asyncio.sleep(1)
 
         # Check if there is any data in the queue
-        if audio_queue.qsize() > 0:
+        with lock:
+            if audio_queue.qsize() > 0:
+                audio_data = audio_queue.get()
 
             # Get the next audio data from the queue
             audio_data, user_ID_ = audio_queue.get()
