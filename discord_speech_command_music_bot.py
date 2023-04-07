@@ -18,11 +18,13 @@ from gtts import gTTS
 # Define the audio and text queues
 audio_queue = Queue()
 text_queue = Queue()
+model_input_queue = Queue()
 video_urls_queue = queue.Queue()
 tts_queue = queue.Queue()
 
 # Create a lock (prefent the threads from accessing something at same time)
 lock = threading.Lock()
+lock2 = threading.Lock()
 
 async def queueTTS_checker(vc, tts_queue):
     while True:
@@ -53,47 +55,60 @@ async def callback(sink: discord.sinks, audio_queue):
             audio_queue.put([audio.file.getvalue(), user_id])
 
 #audio to text by whisper model with additional threads if text queue is not empty
-async def start_transcription(audio_queue, text_queue):
+async def start_transcription(audio_queue, lock):
     while True:
         # Wait for some time before checking the queue again
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)
 
         # Check if there is any data in the queue
-        with lock:
-            if audio_queue.qsize() > 0:
-                audio_data = audio_queue.get()
+        if audio_queue.qsize() > 0:
+            if not lock.locked():
+                with lock:
+                    audio_data, user_ID_ = audio_queue.get()
+                    # Transcribe the audio data
+                filename = f"audio_{random.randint(0, 10000000)}.wav"
+                with open(filename, "wb") as f:
+                    f.write(audio_data)
+                
+                model_input_queue.put([filename, user_ID_])
 
-            # Get the next audio data from the queue
-            audio_data, user_ID_ = audio_queue.get()
-            
-            # Transcribe the audio data
-            filename = f"audio_{random.randint(0, 1000)}.wav"
-            with open(filename, "wb") as f:
-                f.write(audio_data)
+async def start_transcription2(model_input_queue, lock2):
+    while True:
+        # Wait for some time before checking the queue again
+        await asyncio.sleep(0.1)
 
-            try: 
-                #text_raw = model.transcribe(filename)["text"]
+        # Check if there is any data in the queue
+        if model_input_queue.qsize() > 0:
+            with lock2:
+                filename, user_ID_ = model_input_queue.get()
+                # Transcribe the audio data
                 text_raw = model.transcribe(filename)["text"]
                 os.remove(filename)
 
-                # Put the transcribed text into the queue for the main thread to process
-                text_queue.put([text_raw, user_ID_])
-            except:
-                os.remove(filename)
+            # Put the transcribed text into the queue for the main thread to process
+            text_queue.put([text_raw, user_ID_])
+
 
 # Define a function for running the transcription in a separate thread
-def run_transcription():
+def run_transcription(audio_queue, lock):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_transcription(audio_queue, text_queue))
+    loop.run_until_complete(start_transcription(audio_queue, text_queue, lock))
+
+# Define a function for running the transcription in a separate thread
+def run_transcription2(model_input_queue, lock2):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_transcription2(model_input_queue, lock2))
 
 # Start multiple threads for running the transcription
 num_threads = 8
-threads = [threading.Thread(target=run_transcription) for i in range(num_threads)]
+threads = [threading.Thread(target=run_transcription,  args=(audio_queue, text_queue, lock)) for i in range(num_threads)]
+threads2 = [threading.Thread(target=run_transcription2,  args=(model_input_queue, lock2)) for i in range(num_threads)]
 for thread in threads:
     thread.start()
-
-
+for thread in threads2:
+    thread.start()
 
 #text to commands processer
 async def process_commands(vc):
