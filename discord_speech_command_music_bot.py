@@ -53,10 +53,11 @@ async def callback(sink: discord.sinks, audio_queue):
 async def start_transcription(audio_queue, text_queue):
     while True:
         # Wait for some time before checking the queue again
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(1)
 
         # Check if there is any data in the queue
         if audio_queue.qsize() > 0:
+
             # Get the next audio data from the queue
             audio_data, user_ID_ = audio_queue.get()
             
@@ -64,12 +65,16 @@ async def start_transcription(audio_queue, text_queue):
             filename = f"audio_{random.randint(0, 1000)}.wav"
             with open(filename, "wb") as f:
                 f.write(audio_data)
-            #text_raw = model.transcribe(filename)["text"]
-            text_raw = model.transcribe(filename)["text"]
-            os.remove(filename)
 
-            # Put the transcribed text into the queue for the main thread to process
-            text_queue.put([text_raw, user_ID_])
+            try: 
+                #text_raw = model.transcribe(filename)["text"]
+                text_raw = model.transcribe(filename)["text"]
+                os.remove(filename)
+
+                # Put the transcribed text into the queue for the main thread to process
+                text_queue.put([text_raw, user_ID_])
+            except:
+                os.remove(filename)
 
 # Define a function for running the transcription in a separate thread
 def run_transcription():
