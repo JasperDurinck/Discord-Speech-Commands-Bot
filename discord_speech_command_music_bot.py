@@ -13,8 +13,6 @@ from wikipedia_api import wikipedia_search
 from weather_API import get_weather_info
 from gtts import gTTS
 
-
-
 # Define the audio and text queues
 audio_queue = Queue()
 text_queue = Queue()
@@ -29,7 +27,7 @@ lock2 = threading.Lock()
 async def queueTTS_checker(vc, tts_queue):
     while True:
         # Wait for some time before checking the queue again
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
         
         if not tts_queue.empty():
             if not vc.is_playing():
@@ -48,7 +46,6 @@ async def queue_checker(vc, video_urls_queue):
                 await play_song(url, vc)
 
 async def callback(sink: discord.sinks, audio_queue):
-
     for user_id, audio in sink.audio_data.items():
         if user_id in user_discord_ID_white_list:
             audio: discord.sinks.core.AudioData = audio
@@ -88,14 +85,12 @@ async def start_transcription2(model_input_queue, lock2):
             # Put the transcribed text into the queue for the main thread to process
             text_queue.put([text_raw, user_ID_])
 
-
 # Define a function for running the transcription in a separate thread
 def run_transcription(audio_queue, lock):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_transcription(audio_queue, text_queue, lock))
+    loop.run_until_complete(start_transcription(audio_queue, lock))
 
-# Define a function for running the transcription in a separate thread
 def run_transcription2(model_input_queue, lock2):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -103,12 +98,13 @@ def run_transcription2(model_input_queue, lock2):
 
 # Start multiple threads for running the transcription
 num_threads = 8
-threads = [threading.Thread(target=run_transcription,  args=(audio_queue, text_queue, lock)) for i in range(num_threads)]
+threads = [threading.Thread(target=run_transcription,  args=(audio_queue, lock)) for i in range(num_threads)]
 threads2 = [threading.Thread(target=run_transcription2,  args=(model_input_queue, lock2)) for i in range(num_threads)]
 for thread in threads:
     thread.start()
 for thread in threads2:
     thread.start()
+
 
 #text to commands processer
 async def process_commands(vc):
@@ -121,19 +117,22 @@ async def process_commands(vc):
         # Check if there is any data in the queue
         if text_queue.qsize() > 0:
             text_raw, user_id = text_queue.get()
-            print(text_raw)
+            print(f"Audio Transcribed of user: {user_id} | {text_raw}")
             text = text_raw.lower().replace(".", "").replace("!", "").replace(",", "").replace(" ","").replace("?", "").replace("'", "").replace("-", "")
-            print(text)
+            print(f"Processed: {text}")
+
             keywords = keywords_list_voice_commands
             matched_keywords = [keyword for keyword in keywords if keyword in text]
             
-
             if matched_keywords.__len__() > 0:
                 text = matched_keywords[0]
 
                 #youtube searhes
-                if "youtubesearch" in text or "youtubessearch" in text or  "youshouldsearch" in text:
-                    search_command = text_raw.split("youtube search")
+                if any(keyword in text for keyword in ["youtubesearch", "youtubessearch", "youshouldsearch"]):
+                    search_command = text_raw.lower()
+                    search_command = search_command.split("youtube search")
+                    search_command = search_command[-1].split("youtube's search")
+                    search_command = search_command[-1].split("you should search")
                     if search_command[-1].lower().replace(".", "").replace(" ", ""). replace("!", "").replace(",","") not in [".", ",", "!", "youtubesearch", "ed.", 'ed', "ed!", "ed,", "youtubesearched", "youtubesearch."]:
                         search_term = search_command[-1]
                         with ytdl as ydl:
@@ -146,16 +145,15 @@ async def process_commands(vc):
 
                                     url = search_url
                                     video_urls_queue.queue.appendleft(url)
-                                    #await log_commands_discord(bot, user_id, text_raw, url, channel = youtube_search_log_channel_ID)
                                 except:
                                     return None
 
                 #youtube searhes
-                if "wikipediasearch" in text:
+                if any(keyword in text for keyword in ["wikipediasearch"]):
                     search_command = text_raw.split("Wikipedia search")
                     if search_command[-1].lower().replace(".", "").replace(" ", ""). replace("!", "").replace(",","") not in [".", ",", "!", "wikipediasearch", "ed.", 'ed', "ed!", "ed,", "wikipediasearched", "."]:
                         search_term = search_command[-1]   
-                        tts_text = wikipedia_search(search_term)[0:1000]      
+                        tts_text = wikipedia_search(search_term)[0:2000]      
                         #await bot.get_channel(channel_connect_ID).send(tts_text, tts=True)
                         tts_queue.put(tts_text)
                 
@@ -182,24 +180,41 @@ async def process_commands(vc):
                     if vc.is_playing():
                         vc.pause()
 
+                elif text in keywords_dict_memes:
+                    await bot.get_channel(commands_log_channel_ID).send(f"!{text}") 
+                    if vc.is_playing():
+                        vc.stop()
+                    url = keywords_dict_memes[text]
+                    video_urls_queue.queue.appendleft(url)
+
+                elif text in keywords_dict_playlists:
+                    await bot.get_channel(commands_log_channel_ID).send(f"!{text}") 
+                    if vc.is_playing() or vc.is_paused():
+                        vc.stop()
+                    url_playlist1 = keywords_dict_playlists[text] 
+                    playlist = pytube.Playlist(url_playlist1)
+                    video_urls = list(playlist.video_urls)
+                    random.shuffle(video_urls)
+                    for video_url in video_urls:
+                        video_urls_queue.put(video_url) 
+
+
 #recording discord audio loop
 async def start_recording_thread(vc,channel, audio_queue):
-    i = 0 
-    while i <= 10000:
+    for i in range(8000):
         if vc.is_connected() is True:
             print(i)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
             vc.start_recording(discord.sinks.WaveSink(),  lambda *args: callback(*args, audio_queue))
             
             if vc.recording:
                 print("Start recording")
-                await asyncio.sleep(6) # # record for 12 seconds
+                await asyncio.sleep(6) # # record for 6 seconds
                 vc.stop_recording()
                 print("Stopped recording")
         else: 
             print("not connected")
             vc = await channel.connect()
-        i += 1
 
 
 #logging functions
@@ -213,26 +228,43 @@ async def log_commands_discord(bot, user_id, text_raw, url, channel, bot_queue =
     await bot.get_channel(channel).send(f"User Name: {user_name} \nUser ID: {user_id} \nCommand: {text_raw} \nPlaying youtube search: {url}")
 
 #channel connect ID:
-channel_connect_ID =  "VOICE_CHANNEL_ID"
+channel_connect_ID = 1234567890
 
 #user_white_list
-user_discord_ID_white_list = [] #
+user_discord_ID_white_list = [123456789, 1234567899]
 
 #server: bot_logs Bot_teting_env 
-youtube_search_log_channel_ID =  "LOG_CHANNEL_ID"
-commands_log_channel_ID = "LOG_CHANNEL_ID"
+youtube_search_log_channel_ID = 1234567890 
+commands_log_channel_ID = 1234567890
+
+
+# create a dictionary with the keywords and URLs (Note that the link is added as last position of the the keywords)
+def create_keywords_dict(keyword_lists):
+    keywords_dict = {}
+    for keyword_list in keyword_lists:
+        for keyword in keyword_list:
+            keywords_dict[keyword] = keyword_list[-1]
+    return keywords_dict
 
 #keywords for commands:
 keywords_stopmusic = ["stoppedthemusic", "stopmusic", "stopthemusic",  "stopitplaying", "stopplaying", "stopitplay", "stopplaying", "stoptheplaying"]
-keywords_skipmusic = ["Script music","scriptamusic","skipthesong", "skippingthemusic", "skiptomusic", "skipmusic", "skipthemusic", "skipsomeone", "nextmusic", "Skeptomusic"]
-keywords_playmusic = ["playedinmusic", "playamusic", "latemusic", "playitmusic", "startsthemusic", "letsplaymusic", "playedmusic", "startthemusic", "startmusic", "Play to music","playingmusic", "playmusic", "playthemusic", "laymusic", "laythemusic", "lateinmusic", "playedamusic", "lakemusic", "ladymusic", "latermusic", "lateatmusic", "playthenews", "playtheabuse", "latetomusic", "claythemusic"]
+keywords_skipmusic = ["musicskip", "Script music","scriptamusic","skipthesong", "skippingthemusic", "skiptomusic", "skipmusic", "skipthemusic", "skipsomeone", "nextmusic", "Skeptomusic"]
+keywords_playmusic = ["dropthebeat", "playedinmusic", "playamusic", "latemusic", "playitmusic", "startsthemusic", "letsplaymusic", "playedmusic", "startthemusic", "startmusic", "Play to music","playingmusic", "playmusic", "playthemusic", "laymusic", "laythemusic", "lateinmusic", "playedamusic", "lakemusic", "ladymusic", "latermusic", "lateatmusic", "playthenews", "playtheabuse", "latetomusic", "claythemusic"]
 keywords_weather = ["whatdoestheweather", "whatistheweather", "givemetheweather", "givemethecurrentweather", "searchweather", "isitraining", "whatisthetemprature", "doesthesunshine"]
 
 #keywords search commands
-keywords_searchcommands = ["youtubesearch","youtubessearch", "wikipediasearch"]
+keywords_searchcommands = ["youtubesearch", "youtubessearch", "youshouldsearch", "wikipediasearch"]
+
+#memes keywords search commands
+keywords_meme1 = ["rickroll", "meme1", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"]
+keywords_dict_memes = create_keywords_dict([keywords_meme1, ])
+
+#keywords music playlists
+keywords_playlist1 = ["playlist1", "playlistone", "https://www.youtube.com/playlist"]
+keywords_dict_playlists = create_keywords_dict([keywords_playlist1,])
 
 #add all keywords to one list
-keywords_lists = [keywords_stopmusic, keywords_skipmusic, keywords_playmusic, keywords_searchcommands, keywords_weather]
+keywords_lists = [keywords_stopmusic, keywords_skipmusic, keywords_playmusic, keywords_searchcommands, keywords_meme1, keywords_playlist1, keywords_weather]
 keywords_list_voice_commands = []
 
 for sublist in keywords_lists:
@@ -370,4 +402,4 @@ async def on_ready():
     
 
 
-bot.run("TOKEN_DISCORD_BOT")
+bot.run("DISCORD_API_TOKEN")
