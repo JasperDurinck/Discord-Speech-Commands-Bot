@@ -4,35 +4,72 @@ import whisper
 import asyncio
 import pytube
 import queue
-from discord.ext import commands
+from discord.ext import commands, tasks
 import yt_dlp as youtube_dl
 import random
 import threading
 from queue import Queue
-from wikipedia_api import wikipedia_search
-from weather_API import get_weather_info
+import multiprocessing
+from llama_cpp import Llama
+from LLama_prompt_wrapper import make_chat_prompt
+import queue
+import time
 from gtts import gTTS
 
-# Define the audio and text queues
-audio_queue = Queue()
-text_queue = Queue()
-model_input_queue = Queue()
-video_urls_queue = queue.Queue()
-tts_queue = queue.Queue()
+from keywords import (
+    keywords_stopmusic,
+    keywords_skipmusic,
+    keywords_playmusic,
+    keywords_clearmusicqueue,
+    keywords_shufflemusicqueue,
+    keywords_weather,
+    keywords_searchcommands,
+    keywords_rickroll,
+    keywords_playlist1,
+    keywords_llm
+)
 
-# Create a lock (prefent the threads from accessing something at same time)
-lock = threading.Lock()
-lock2 = threading.Lock()
+from settings import (
+    channel_connect_ID,
+    user_discord_ID_white_list,
+    youtube_search_log_channel_ID,
+    commands_log_channel_ID,
+    ytdl_format_options,
+    ffmpeg_options,
+    llm_model_path,
+    whisper_model,
+    n_ctx,
+    n_gpu_layers,
+    n_batch,
+    n_threads,
+    DISCORD_BOT_TOKEN
+)
+
+#load in models
+model = whisper.load_model(whisper_model, device="cuda") #speech to text
+
+llm = Llama(model_path = llm_model_path, 
+                 n_ctx = n_ctx,
+                 n_gpu_layers = n_gpu_layers,
+                 n_batch = n_batch,
+                 n_threads = n_threads) #text to speech
+
+
+vc =  None
+channel = None
 
 async def queueTTS_checker(vc, tts_queue):
     while True:
-        # Wait for some time before checking the queue again
-        await asyncio.sleep(2)
-        
-        if not tts_queue.empty():
-            if not vc.is_playing():
-                tts_text = tts_queue.get()
-                await tts_gtts(vc, tts_text)
+        await asyncio.sleep(0.3)
+        with tts_shared_lock:
+            # Wait for some time before checking the queue again
+            await asyncio.sleep(1)
+            if not tts_queue.empty():
+                if not vc.is_playing():
+                    tts_text = tts_queue.get()
+            else:
+                continue
+            await tts_gtts(vc, tts_text)
 
 async def queue_checker(vc, video_urls_queue):
     while True:
@@ -96,23 +133,13 @@ def run_transcription2(model_input_queue, lock2):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(start_transcription2(model_input_queue, lock2))
 
-# Start multiple threads for running the transcription
-num_threads = 8
-threads = [threading.Thread(target=run_transcription,  args=(audio_queue, lock)) for i in range(num_threads)]
-threads2 = [threading.Thread(target=run_transcription2,  args=(model_input_queue, lock2)) for i in range(num_threads)]
-for thread in threads:
-    thread.start()
-for thread in threads2:
-    thread.start()
-
-
 #text to commands processer
 async def process_commands(vc):
     while True:
 
         # Get the next transcribed text from the queue
         # Wait for some time before checking the queue again
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(1)
 
         # Check if there is any data in the queue
         if text_queue.qsize() > 0:
@@ -157,10 +184,17 @@ async def process_commands(vc):
                         #await bot.get_channel(channel_connect_ID).send(tts_text, tts=True)
                         tts_queue.put(tts_text)
                 
+                 #youtube searhes
+                if any(keyword in text for keyword in keywords_llm):
+                    search_command = text_raw
+                    LLM_queue.put(text_raw)
+                    
+                
                 #youtube searhes
                 if text in keywords_weather:  
                         tts_text = get_weather_info()
                         tts_queue.put(tts_text)
+                        
 
                 #voice commands
                 if  text in keywords_playmusic:
@@ -180,6 +214,18 @@ async def process_commands(vc):
                     if vc.is_playing():
                         vc.pause()
 
+                elif text in keywords_clearmusicqueue:
+                    await bot.get_channel(commands_log_channel_ID).send("!clearmusicqueue") 
+                    video_urls_queue.queue.clear()
+
+                elif text in keywords_shufflemusicqueue:
+                    await bot.get_channel(commands_log_channel_ID).send("!shufflemusicqueue") 
+                    video_urls_list = list(video_urls_queue.queue)
+                    random.shuffle(video_urls_list)
+                    video_urls_queue.queue.clear()
+                    for url in video_urls_list:
+                        video_urls_queue.put(url)
+
                 elif text in keywords_dict_memes:
                     await bot.get_channel(commands_log_channel_ID).send(f"!{text}") 
                     if vc.is_playing():
@@ -196,8 +242,7 @@ async def process_commands(vc):
                     video_urls = list(playlist.video_urls)
                     random.shuffle(video_urls)
                     for video_url in video_urls:
-                        video_urls_queue.put(video_url) 
-
+                        video_urls_queue.queue.appendleft(video_url) 
 
 #recording discord audio loop
 async def start_recording_thread(vc,channel, audio_queue):
@@ -216,7 +261,6 @@ async def start_recording_thread(vc,channel, audio_queue):
             print("not connected")
             vc = await channel.connect()
 
-
 #logging functions
 async def log_commands_discord(bot, user_id, text_raw, url, channel, bot_queue = False):
     if bot_queue is False:
@@ -227,17 +271,6 @@ async def log_commands_discord(bot, user_id, text_raw, url, channel, bot_queue =
         text_raw = "Next Song"
     await bot.get_channel(channel).send(f"User Name: {user_name} \nUser ID: {user_id} \nCommand: {text_raw} \nPlaying youtube search: {url}")
 
-#channel connect ID:
-channel_connect_ID = 1234567890
-
-#user_white_list
-user_discord_ID_white_list = [123456789, 1234567899]
-
-#server: bot_logs Bot_teting_env 
-youtube_search_log_channel_ID = 1234567890 
-commands_log_channel_ID = 1234567890
-
-
 # create a dictionary with the keywords and URLs (Note that the link is added as last position of the the keywords)
 def create_keywords_dict(keyword_lists):
     keywords_dict = {}
@@ -246,25 +279,12 @@ def create_keywords_dict(keyword_lists):
             keywords_dict[keyword] = keyword_list[-1]
     return keywords_dict
 
-#keywords for commands:
-keywords_stopmusic = ["stoppedthemusic", "stopmusic", "stopthemusic",  "stopitplaying", "stopplaying", "stopitplay", "stopplaying", "stoptheplaying"]
-keywords_skipmusic = ["musicskip", "Script music","scriptamusic","skipthesong", "skippingthemusic", "skiptomusic", "skipmusic", "skipthemusic", "skipsomeone", "nextmusic", "Skeptomusic"]
-keywords_playmusic = ["dropthebeat", "playedinmusic", "playamusic", "latemusic", "playitmusic", "startsthemusic", "letsplaymusic", "playedmusic", "startthemusic", "startmusic", "Play to music","playingmusic", "playmusic", "playthemusic", "laymusic", "laythemusic", "lateinmusic", "playedamusic", "lakemusic", "ladymusic", "latermusic", "lateatmusic", "playthenews", "playtheabuse", "latetomusic", "claythemusic"]
-keywords_weather = ["whatdoestheweather", "whatistheweather", "givemetheweather", "givemethecurrentweather", "searchweather", "isitraining", "whatisthetemprature", "doesthesunshine"]
 
-#keywords search commands
-keywords_searchcommands = ["youtubesearch", "youtubessearch", "youshouldsearch", "wikipediasearch"]
-
-#memes keywords search commands
-keywords_meme1 = ["rickroll", "meme1", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"]
-keywords_dict_memes = create_keywords_dict([keywords_meme1, ])
-
-#keywords music playlists
-keywords_playlist1 = ["playlist1", "playlistone", "https://www.youtube.com/playlist"]
-keywords_dict_playlists = create_keywords_dict([keywords_playlist1,])
+keywords_dict_memes = create_keywords_dict([keywords_rickroll])
+keywords_dict_playlists = create_keywords_dict([keywords_playlist1])
 
 #add all keywords to one list
-keywords_lists = [keywords_stopmusic, keywords_skipmusic, keywords_playmusic, keywords_searchcommands, keywords_meme1, keywords_playlist1, keywords_weather]
+keywords_lists = [keywords_stopmusic, keywords_skipmusic, keywords_playmusic, keywords_clearmusicqueue, keywords_shufflemusicqueue, keywords_searchcommands, keywords_playlist1, keywords_weather, keywords_rickroll,keywords_llm]
 keywords_list_voice_commands = []
 
 for sublist in keywords_lists:
@@ -272,45 +292,10 @@ for sublist in keywords_lists:
 
 
 #youtube music
-
 # Suppress noise about console usage from errors
 youtube_dl.utils.bug_reports_message = lambda: ''
 
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
-    'default_search': 'ytsearch10:music', # Only search for music
-
-}
-
-ffmpeg_options = {
-    'options': '-vn',
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-}
-
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
-
-#speech bot
-#bot = discord.Client()
-model = whisper.load_model("tiny.en", device="cuda")
-
-
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(
-    command_prefix=commands.when_mentioned_or("!"),
-    description='Relatively simple music bot example',
-    intents=intents,)
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -344,14 +329,38 @@ async def play_song(url, vc):
         await asyncio.sleep(1)
 
 async def tts_gtts(vc, text):
-    language = "en"
-    tts = gTTS(text=text, lang=language, tld="com", slow=False,)
-    tts_filename = f"audio_tts_{random.randint(0, 1000)}.mp3"
-    tts.save(tts_filename)
-    vc.play(discord.FFmpegPCMAudio(tts_filename))
-    while vc.is_playing():
-        await asyncio.sleep(1)
-    os.remove(tts_filename)
+    global channel
+    if text is not None or text is not '':
+        language = "en"
+        tts = gTTS(text=text, lang=language, tld="com.au", slow=False,)
+        tts_filename = f"audio_tts_{random.randint(0, 1000)}.mp3"
+        tts.save(tts_filename)
+
+        if vc.is_connected() is False:
+            if vc.is_connected() is not True:
+                try:
+                    vc = await channel.connect()
+                except:
+                    print('test')
+
+        vc.play(discord.FFmpegPCMAudio(tts_filename))
+
+        while vc.is_playing():
+            await asyncio.sleep(1)
+            if vc.is_connected() is not True:
+                try:
+                    vc = await channel.connect()
+                except:
+                    continue
+        os.remove(tts_filename)
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(
+    command_prefix=commands.when_mentioned_or("$"),
+    description='Relatively simple music bot example',
+    intents=intents,)
 
 @bot.command(name='play', help='Add a YouTube video or playlist to the queue.')
 async def play(ctx, url):
@@ -364,10 +373,7 @@ async def play(ctx, url):
         elif 'youtube.com/playlist?list=' in url:
             playlist = pytube.Playlist(url)
             for video_url in playlist.video_urls:
-                video_urls_queue.put(video_url)
-            #await ctx.send(f'{playlist.title} ({playlist.video_count} videos) added to the queue!')
-        global current_url
-        current_url = url
+                video_urls_queue.queue.appendleft(video_url)
     else:
         await ctx.send('Invalid YouTube video or playlist URL.')
 
@@ -380,13 +386,138 @@ async def show_queue(ctx, num_songs=5):
         song_list.append(video.title)
     await ctx.send('Currently in queue:\n' + '\n'.join(song_list))
 
+@bot.command(name='clear', help='Clear the queue.')
+async def show_queue(ctx):
+    video_urls_queue.queue.clear()
+    await ctx.send('The queue is cleared')
+
+#LLM 
+class LLM_speech:
+    def __init__(self, llm, completion, LLM_queue,tts_queue, tts_shared_lock, speech_rate=120):
+        global vc
+        print("initiate LLM_speech object")
+        self.llm = llm
+        self.completion = completion
+        self.token_buffer = []
+        self.sentence_queue = queue.Queue()
+        self.token_queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.token_lock = threading.Lock()
+        self.sentence_lock = threading.Lock()
+        self.all_tokens_generated = False
+        self._exit_flag = False
+        self.discord_vc = vc
+
+        self.LLM_queue = LLM_queue
+        self.tts_queue = tts_queue
+        self.tts_shared_lock = tts_shared_lock
+
+        # Start a separate thread for token generation
+        self.tokens_thread = threading.Thread(target=self.add_tokens)
+        self.tokens_thread.start()
+
+        # Start a separate thread for token generation
+        self.sentence_thread = threading.Thread(target=self.tokens_to_sentence_thread)
+        self.sentence_thread.start()
+
+        # Start a separate thread for speech generation
+        self.speech_thread = threading.Thread(target=self._speech_thread)
+        self.speech_thread.start()
+
+    def add_tokens(self):
+        for token in self.completion:
+            if token == self.llm.token_eos():
+                break
+
+            while not self.token_lock.acquire(timeout=1.0):
+                # Wait for the lock to be acquired
+                time.sleep(0.1)
+                pass
+
+            try:
+                self.token_buffer.append(token)
+            finally:
+                self.token_lock.release()
+        
+        self.all_tokens_generated = True
+        
+    def tokens_to_sentence_thread(self):
+        while True:
+            with self.token_lock:
+                if len(self.token_buffer) > 20 or self.all_tokens_generated == True:
+                    # Detokenize and convert to text
+                    sentence = self.llm.detokenize(self.token_buffer).decode("utf-8")
+
+                    if sentence == "":
+                        # Optionally, you can set a flag to signal the thread to exit
+                        self._exit_flag = True
+                        break  # Exit the loop and thread
+
+                    # Add tokens to the sentence queue
+                    with self.sentence_lock:
+                        self.sentence_queue.put(sentence)
+
+                    # Empty the token buffer
+                    self.token_buffer.clear()
+                else:
+                    # Optional: You can add a sleep to avoid continuous checking and reduce CPU usage
+                    time.sleep(0.1)  # Adjust the sleep duration as needed
+
+    def _speech_thread(self): 
+       
+        while True:
+            if self._exit_flag == True and self.sentence_queue.empty():
+                break
+            with self.lock:
+                if not self.sentence_queue.empty():
+                    sentence = self.sentence_queue.get()
+
+                    if sentence is None or sentence is '':
+                        self.close()
+
+                    print(sentence)
+
+                    with self.tts_shared_lock:
+                        self.tts_queue.put(sentence)
+                else:
+                    # Optional: You can add a sleep to avoid continuous checking and reduce CPU usage
+                    time.sleep(0.1)  # Adjust the sleep duration as needed
+
+    def close(self):
+        # Signal the token thread and speech thread to exit
+        self.tokens_thread.join()
+        self.sentence_thread.join()
+
+
+#@bot.slash_command()
+def llm_command(user_input, LLM_queue,tts_queue, tts_shared_lock):
+    tokens = make_chat_prompt(
+        llm,
+        user_input,
+    )
+
+    completion = llm.generate(
+        tokens=tokens,
+    )
+
+    # Example usage:
+    # Create an instance of LLM_speech
+    llm_speech = LLM_speech(llm=llm, completion=completion, LLM_queue=LLM_queue,tts_queue=tts_queue, tts_shared_lock=tts_shared_lock)
+
+    # Close the instance when done
+    llm_speech.close()
+
 #run
 @bot.event
 async def on_ready():
+    global vc, channel
+    
     print('Logged in as {0} ({0.id})'.format(bot.user))
     print('------')
     channel = bot.get_channel(channel_connect_ID)
     vc = await channel.connect()
+
+
     # Create event loop
     loop = asyncio.get_event_loop()
 
@@ -400,6 +531,51 @@ async def on_ready():
     # Run tasks concurrently
     await asyncio.gather(start_recording_thread_task, process_commands_task, queue_checker_task, queueTTS_checker_task)
     
+def llm_process(LLM_queue, tts_queue, tts_shared_lock):
+    while True:
+        user_input = LLM_queue.get()
+        if user_input is None:
+            break  # Exit the loop if sentinel value is received
+        llm_command(user_input=user_input, LLM_queue=LLM_queue,tts_queue=tts_queue, tts_shared_lock=tts_shared_lock)
+        print(f"Running LLM process on: {user_input}")
+
+def start_llm_process(LLM_queue,tts_queue, tts_shared_lock):
+    llm_process(LLM_queue,tts_queue, tts_shared_lock)
 
 
-bot.run("DISCORD_API_TOKEN")
+if __name__ == "__main__":
+
+    # Define the audio and text queues
+    audio_queue = Queue()
+    text_queue = Queue()
+    model_input_queue = Queue()
+    video_urls_queue = queue.Queue()
+
+    # Create a lock (prefent the threads from accessing something at same time)
+    lock = threading.Lock()
+    lock2 = threading.Lock()
+
+
+    with multiprocessing.Manager() as manager:
+
+        LLM_queue = manager.Queue()
+        
+        tts_queue = manager.Queue()
+        tts_shared_lock = manager.Lock()
+
+        # main/first multiprocess
+        num_threads = 8
+        threads = [threading.Thread(target=run_transcription,  args=(audio_queue, lock)) for i in range(num_threads)]
+        threads2 = [threading.Thread(target=run_transcription2,  args=(model_input_queue, lock2)) for i in range(num_threads)]
+        for thread in threads:
+            thread.start()
+        for thread in threads2:
+            thread.start()
+
+        # Start the LLM process that gets triggered by the first one every time in the non-stop loop the queue gets added a string
+        llm_process = multiprocessing.Process(target=start_llm_process, args=(LLM_queue, tts_queue, tts_shared_lock),)
+        llm_process.start()
+
+        LLM_queue.put("hello")
+
+        bot.run(DISCORD_BOT_TOKEN)
